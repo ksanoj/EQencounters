@@ -5,9 +5,7 @@
     - The Strength of a Wolf (Shae)
     - The Bravery of a Bear (Valia)
     - The Cunning of a Tiger (Yasil)
-    
-    Usage: /lua run nosmerc
-    Click "Get Quests" button to start
+
 ]]
 
 local mq = require('mq')
@@ -27,6 +25,7 @@ local function registerActor()
         local braveryCount = received.BraveryCount
         local cunningCount = received.CunningCount
         local strengthCount = received.StrengthCount
+        local hasValia = received.HasValia
         
         if sender then
             if not itemCounts[sender] then
@@ -35,6 +34,7 @@ local function registerActor()
             itemCounts[sender].bravery = braveryCount or 0
             itemCounts[sender].cunning = cunningCount or 0
             itemCounts[sender].strength = strengthCount or 0
+            itemCounts[sender].hasValia = hasValia or false
         end
     end)
 end
@@ -43,6 +43,7 @@ local function checkAndBroadcastItems()
     local braveryCount = mq.TLO.FindItemCount("Freed Spirit of Bravery")() or 0
     local cunningCount = mq.TLO.FindItemCount("Freed Spirit of Cunning")() or 0
     local strengthCount = mq.TLO.FindItemCount("Freed Spirit of Strength")() or 0
+    local hasValia = mq.TLO.FindItemCount("Valia's Unyielding Bravery")() > 0
     
     if not itemCounts[myName] then
         itemCounts[myName] = {}
@@ -50,13 +51,15 @@ local function checkAndBroadcastItems()
     itemCounts[myName].bravery = braveryCount
     itemCounts[myName].cunning = cunningCount
     itemCounts[myName].strength = strengthCount
+    itemCounts[myName].hasValia = hasValia
     
     if actor then
         actor:send({ mailbox = mailboxName }, {
             Sender = myName,
             BraveryCount = braveryCount,
             CunningCount = cunningCount,
-            StrengthCount = strengthCount
+            StrengthCount = strengthCount,
+            HasValia = hasValia
         })
     end
 end
@@ -70,6 +73,7 @@ local state = {
     groupMode = false,
     visibleChars = {},
     turnInType = nil,
+    startQuest = false,
 }
 
 local function log(msg)
@@ -502,7 +506,7 @@ local function renderUI()
         if not state.questActive then
             if ImGui.Button("Get Quests", 200, 40) then
                 log("Get Quests button clicked")
-                runQuestSequence()
+                state.startQuest = true
             end
         else
             ImGui.PushStyleColor(ImGuiCol.Button, 0.8, 0.5, 0.2, 1)
@@ -537,16 +541,6 @@ local function renderUI()
                         state.visibleChars[char] = true
                     end
                     
-                    local bravery = counts.bravery or 0
-                    local cunning = counts.cunning or 0
-                    local strength = counts.strength or 0
-                    local total = bravery + cunning + strength
-                    local remaining = 80 - total
-                    local braveryColor = bravery > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
-                    local cunningColor = cunning > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
-                    local strengthColor = strength > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
-                    local needColor = remaining <= 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(1, 0.8, 0, 1)
-                    
                     ImGui.TableNextRow()
                     ImGui.TableSetColumnIndex(0)
                     local visibleChanged, newVisible = ImGui.Checkbox("##show_" .. char, state.visibleChars[char])
@@ -554,16 +548,39 @@ local function renderUI()
                         state.visibleChars[char] = newVisible
                     end
                     
-                    ImGui.TableSetColumnIndex(1)
-                    ImGui.Text(char)
-                    ImGui.TableSetColumnIndex(2)
-                    ImGui.TextColored(braveryColor, tostring(bravery))
-                    ImGui.TableSetColumnIndex(3)
-                    ImGui.TextColored(cunningColor, tostring(cunning))
-                    ImGui.TableSetColumnIndex(4)
-                    ImGui.TextColored(strengthColor, tostring(strength))
-                    ImGui.TableSetColumnIndex(5)
-                    ImGui.TextColored(needColor, tostring(remaining))
+                    if counts.hasValia then
+                        ImGui.TableSetColumnIndex(1)
+                        ImGui.Text(char)
+                        ImGui.TableSetColumnIndex(2)
+                        ImGui.Text("")
+                        ImGui.TableSetColumnIndex(3)
+                        ImGui.Text("")
+                        ImGui.TableSetColumnIndex(4)
+                        ImGui.Text("")
+                        ImGui.TableSetColumnIndex(5)
+                        ImGui.TextColored(ImVec4(0.4, 1, 0.4, 1), "Has Valia's")
+                    else
+                        local bravery = counts.bravery or 0
+                        local cunning = counts.cunning or 0
+                        local strength = counts.strength or 0
+                        local total = bravery + cunning + strength
+                        local remaining = 80 - total
+                        local braveryColor = bravery > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
+                        local cunningColor = cunning > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
+                        local strengthColor = strength > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
+                        local needColor = remaining <= 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(1, 0.8, 0, 1)
+                        
+                        ImGui.TableSetColumnIndex(1)
+                        ImGui.Text(char)
+                        ImGui.TableSetColumnIndex(2)
+                        ImGui.TextColored(braveryColor, tostring(bravery))
+                        ImGui.TableSetColumnIndex(3)
+                        ImGui.TextColored(cunningColor, tostring(cunning))
+                        ImGui.TableSetColumnIndex(4)
+                        ImGui.TextColored(strengthColor, tostring(strength))
+                        ImGui.TableSetColumnIndex(5)
+                        ImGui.TextColored(needColor, tostring(remaining))
+                    end
                 end
                 
                 ImGui.EndTable()
@@ -615,6 +632,11 @@ local function main()
     while state.isRunning do
         mq.delay(100)
         mq.doevents()
+        
+        if state.startQuest then
+            state.startQuest = false
+            runQuestSequence()
+        end
         
         if state.questActive and state.turnInType then
             if state.turnInType == 'bear' then
