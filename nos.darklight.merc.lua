@@ -5,7 +5,9 @@
     - The Strength of a Wolf (Shae)
     - The Bravery of a Bear (Valia)
     - The Cunning of a Tiger (Yasil)
-
+    
+    Usage: /lua run nosmerc
+    Click "Get Quests" button to start
 ]]
 
 local mq = require('mq')
@@ -564,7 +566,7 @@ local function renderUI()
                         local cunning = counts.cunning or 0
                         local strength = counts.strength or 0
                         local total = bravery + cunning + strength
-                        local remaining = 80 - total
+                        local remaining = 135 - total
                         local braveryColor = bravery > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
                         local cunningColor = cunning > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
                         local strengthColor = strength > 0 and ImVec4(0.4, 1, 0.4, 1) or ImVec4(0.7, 0.7, 0.7, 1)
