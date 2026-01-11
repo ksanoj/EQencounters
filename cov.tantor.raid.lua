@@ -52,6 +52,9 @@ local function on_tantor_rock(line, target)
     -- Set flag to indicate this character is ducking
     isDuckingFromRock = true
     
+    mq.cmd('/dismount')
+    mq.delay(100)
+    
     if not mq.TLO.Me.State.Equal("DUCK")() then
         mq.cmd('/keypress DUCK')
     end
@@ -186,7 +189,7 @@ local function drawGUI()
     
     -- Setup instructions
     ImGui.Separator()
-    ImGui.TextWrapped("Setup: set MT for permatanking Tantor. set ST for autopickup a_primal_guardian00 and activate auto")
+    ImGui.TextWrapped("Setup: set MT for permatanking Tantor. set ST for autopickup a_primal_guardian00 and activate auto. No mounts if you want duck achevement.")
     
     ImGui.End()
 end
