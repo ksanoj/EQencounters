@@ -3,6 +3,8 @@
     Watches for a_bomb00-03 spawns within 200 range.
     After 5 second delay, spams Valia's Unyielding Bravery until not ready
     and Protection of the Primal Spirits buff is present, then exits.
+next: 
+mechanic handle if valias is not present or on CD
 --]]
 
 local mq = require('mq')
