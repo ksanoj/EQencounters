@@ -1,18 +1,10 @@
 ---@type Mq
 local mq = require('mq')
 
--- Pause state
-local isPaused = false
 local dpsPaused = false  -- Track DPS pause state to avoid spam
 
 local required_zone = {
     ['mischiefplane_raid'] = true,  -- Add your zone here
-}
-
--- Mobs that should be mezzed
-local mezTargets = {
-    ['a_white_rabbit00'] = true,
-    ['a_white_rabbit01'] = true,
 }
 
 -- Mez spells configuration for each class
@@ -24,7 +16,8 @@ local mezzes = {
         {name='Mesmerizing Wave XV', type='spell', order='4'}
     },
     BRD = {
-        {name='Slumber of Suja', type='spell', order='1'},
+        {name='Dirge of the Sleepwalker', type='aa', order='1'},
+        {name='Slumber of Suja', type='spell', order='2'},
     },
 }
 
@@ -36,34 +29,48 @@ local unbreakable = {
 
 -- Spawn caching for performance
 local lastSpawnCheck = 0
-local spawnCheckInterval = 2000  -- Check spawns every 2 seconds
-local cachedSpawns = {}  -- Cache spawn IDs and data
+local spawnCheckInterval = 500  -- Check spawns frequently for fast mez response
+local cachedSpawns = {}  -- Cached list of rabbit spawn data
 
--- Check if target has the mez buff
-local function hasMezBuff(targetID)
-    if not targetID or targetID == 0 then return false end
+-- Hardcoded rabbit spawn names (maximum possible)
+local mezTargetNames = {
+    'a_white_rabbit00',
+    'a_white_rabbit01',
+    'a_white_rabbit02',
+    'a_white_rabbit03',
+}
+
+-- Update cached spawns - direct lookup for each known rabbit
+local function updateSpawnCache()
+    local currentTime = mq.gettime()
     
-    -- Target the mob to check buffs
-    local currentTarget = mq.TLO.Target.ID()
-    if currentTarget ~= targetID then
-        mq.cmdf('/target id %d', targetID)
-        mq.delay(200)
+    if currentTime - lastSpawnCheck < spawnCheckInterval then
+        return
     end
     
-    -- Check if target has the mez buff
-    local numBuffs = mq.TLO.Target.BuffCount() or 0
-    for i = 1, numBuffs do
-        local buff = mq.TLO.Target.Buff(i)
-        if buff() and buff.Name() then
-            local buffName = buff.Name()
-            -- Check if buff name contains "Mesmerize" or "Slumber"
-            if buffName:find("Mesmerize") or buffName:find("Slumber") or buffName:find("Beam of Slumber") or buffName:find("Banishment") then
-                return true
-            end
+    lastSpawnCheck = currentTime
+    
+    cachedSpawns = {}
+    
+    for _, name in ipairs(mezTargetNames) do
+        local spawn = mq.TLO.Spawn(string.format('npc "%s"', name))
+        if spawn and spawn() and spawn.ID() and spawn.ID() > 0 then
+            table.insert(cachedSpawns, {
+                ID = spawn.ID(),
+                CleanName = spawn.CleanName() or name,
+                Distance = spawn.Distance() or 999,
+                LineOfSight = spawn.LineOfSight() or false,
+            })
         end
     end
     
-    return false
+    if #cachedSpawns > 0 then
+        print(string.format('[LS Mez] Found %d rabbit(s)', #cachedSpawns))
+        for i, s in ipairs(cachedSpawns) do
+            print(string.format('[LS Mez]   #%d: %s (ID: %s, Dist: %.0f, LoS: %s)', 
+                i, s.CleanName, s.ID, s.Distance, tostring(s.LineOfSight)))
+        end
+    end
 end
 
 local function StopDPS()
@@ -76,11 +83,7 @@ local function StopDPS()
     if mq.TLO.Me.Class.ShortName() == 'BRD' then
         mq.cmd('/squelch /stopsong')
         mq.delay(10)
-        mq.cmd('/squelch /stopsong')
-        mq.delay(10)
     end
-    mq.cmd('/squelch /rdpause on')
-    mq.delay(10)
     if (mq.TLO.Me.Casting.ID()) and (not unbreakable[mq.TLO.Me.Class.ShortName()]) then
         mq.cmd('/squelch /stopcast')
         mq.delay(100)
@@ -94,88 +97,54 @@ local function ResumeDPS()
     dpsPaused = false
     mq.cmd('/squelch /rdpause off')
     mq.delay(10)
-    mq.cmd('/squelch /rdpause off')
-    mq.delay(10)
 end
 
--- Update cached spawns
-local function updateSpawnCache()
-    local currentTime = mq.gettime()
+-- Cached mez abilities (populated at startup with resolved rank names / AA IDs)
+local cachedMezAbilities = {}
+
+local function initMezCache(myClass)
+    local mez = mezzes[myClass]
+    if not mez then return end
     
-    -- Only update cache every 2 seconds
-    if currentTime - lastSpawnCheck < spawnCheckInterval then
-        return
+    -- Sort once at startup
+    table.sort(mez, function(a, b) return a['order'] < b['order'] end)
+    
+    for _, data in ipairs(mez) do
+        local entry = { name = data.name, type = data.type, order = data.order }
+        if data.type == 'spell' then
+            entry.rankName = mq.TLO.Spell(data.name).RankName() or data.name
+        elseif data.type == 'aa' then
+            entry.aaID = mq.TLO.Me.AltAbility(data.name).ID() or 0
+        end
+        table.insert(cachedMezAbilities, entry)
     end
     
-    lastSpawnCheck = currentTime
-    
-    -- Cache rabbit spawn IDs
-    local rabbit1 = mq.TLO.Spawn('npc "a_white_rabbit00"')
-    local rabbit2 = mq.TLO.Spawn('npc "a_white_rabbit01"')
-    
-    cachedSpawns = {
-        rabbit1ID = rabbit1 and rabbit1.ID() or 0,
-        rabbit2ID = rabbit2 and rabbit2.ID() or 0
-    }
+    print(string.format('[LS Mez] Cached %d mez abilities for %s', #cachedMezAbilities, myClass))
 end
 
 local function mez_ready(data)
-    -- Customize this function for your specific mez targets
-    -- 200 should be enough
-    if not spawn or not spawn.Type then return false end
-    
-    -- Check if this is a mob we should mez
-    local mobName = spawn.CleanName()
-    if not mezTargets[mobName] then
-        return false
+    local isUnbreakable = unbreakable[mq.TLO.Me.Class.ShortName()]
+    if data.type == 'spell' then
+        local ready = mq.TLO.Me.SpellReady(data.rankName)()
+        return ready and (not isUnbreakable or not mq.TLO.Me.Casting())
+    elseif data.type == 'aa' then
+        local ready = mq.TLO.Me.AltAbilityReady(data.name)()
+        return ready and (not isUnbreakable or not mq.TLO.Me.Casting())
     end
-    
-    -- Check basic validity first
-    if spawn.Type() ~= 'NPC' or spawn.Dead() or not spawn.LineOfSight() or (spawn.Distance() or 999) > 200 then
-        return false
-    end
-    
-    -- Check if already mezzed using buff check
-    local spawnID = spawn.ID()
-    if hasMezBuff(spawnID) then
-        return false
-    end
-    
-    return true
+    return false
 end
 
-local function mez_ready(data)
-    if not unbreakable[mq.TLO.Me.Class.ShortName()] then
-        if data.type == 'spell' then
-            return mq.TLO.Me.SpellReady(mq.TLO.Spell(data.name).RankName())()
-        elseif data.type == 'aa' then
-            return mq.TLO.Me.AltAbilityReady(data.name)()
-        end
-    else
-        if data.type == 'spell' then
-            return (mq.TLO.Me.SpellReady(mq.TLO.Spell(data.name).RankName())() and not mq.TLO.Me.Casting())
-        elseif data.type == 'aa' then
-            return (mq.TLO.Me.AltAbilityReady(data.name)() and not mq.TLO.Me.Casting())
-        end
-    end
-end
-
--- Simple mez function like encmez - kopia
+-- Simple mez function - target is already validated by performMezRotation
 local function castMezOnTarget(targetID, targetName)
     if not targetID or targetID == 0 then return false end
     
     -- Target the mob
     mq.cmdf('/target id %d', targetID)
-    mq.delay(200)
+    mq.delay(200, function() return mq.TLO.Target.ID() == targetID end)
     
     -- Verify target
     if mq.TLO.Target.ID() ~= targetID then
         print(string.format('[LS Mez] Failed to target %s (ID: %d)', targetName, targetID))
-        return false
-    end
-    
-    -- Check if already mezzed
-    if hasMezBuff(targetID) then
         return false
     end
     
@@ -184,29 +153,37 @@ local function castMezOnTarget(targetID, targetName)
         return false
     end
     
-    -- Get mez abilities
-    local mez = mezzes[mq.TLO.Me.Class.ShortName()]
-    if not mez then return false end
+    -- Skip if target is fleeing (pathing out of room)
+    if mq.TLO.Target.Fleeing() then
+        return false
+    end
     
-    table.sort(mez, function(a, b) return a['order'] < b['order'] end)
-    
-    -- Try to cast first available mez
-    for _, data in ipairs(mez) do
+    -- Try to cast first available mez (already sorted at startup)
+    for _, data in ipairs(cachedMezAbilities) do
         if mez_ready(data) then
             print(string.format('[LS Mez] Mezzing %s (ID: %d) with %s', targetName, targetID, data.name))
             
             if data.type == 'spell' then
-                mq.cmdf('/cast "%s"', mq.TLO.Spell(data.name).RankName())
+                mq.cmdf('/cast "%s"', data.rankName)
             else
-                mq.cmdf('/alt activate %d', mq.TLO.Me.AltAbility(data.name).ID())
+                mq.cmdf('/alt activate %d', data.aaID)
             end
             
-            -- Wait for cast to complete
+            -- Wait for cast to complete with timeout (max 10 seconds)
             mq.delay(100)
-            while mq.TLO.Me.Casting() do
+            local castWait = 0
+            while mq.TLO.Me.Casting() and castWait < 200 do
+                mq.delay(50)
+                castWait = castWait + 1
+            end
+            
+            -- Bards need to stop singing after cast or the song keeps pulsing
+            if mq.TLO.Me.Class.ShortName() == 'BRD' then
+                mq.cmd('/squelch /stopsong')
                 mq.delay(50)
             end
             
+            print(string.format('[LS Mez] Cast %s on %s', data.name, targetName))
             return true
         end
     end
@@ -214,93 +191,46 @@ local function castMezOnTarget(targetID, targetName)
     return false
 end
 
--- Main mez check like encmez - kopia
+-- Main mez check - prioritize closest non-fleeing rabbit in line of sight
 local function performMezRotation()
     -- Update spawn cache
     updateSpawnCache()
     
-    local rabbit1ID = cachedSpawns.rabbit1ID or 0
-    local rabbit2ID = cachedSpawns.rabbit2ID or 0
+    -- Build list of valid rabbits (in range, LoS)
+    local targets = {}
     
-    -- Check if rabbits exist and are alive
-    local rabbit1Spawn = nil
-    local rabbit2Spawn = nil
-    
-    if rabbit1ID > 0 then
-        rabbit1Spawn = mq.TLO.Spawn(string.format('id %d', rabbit1ID))
+    for _, spawn in ipairs(cachedSpawns) do
+        local id = spawn['ID']
+        local name = spawn['CleanName']
+        local dist = spawn['Distance'] or 999
+        local los = spawn['LineOfSight']
+        
+        if id and id > 0 and dist <= 120 and los then
+            table.insert(targets, { id = id, name = name, distance = dist })
+        end
     end
-    if rabbit2ID > 0 then
-        rabbit2Spawn = mq.TLO.Spawn(string.format('id %d', rabbit2ID))
-    end
     
-    local rabbit1Valid = rabbit1Spawn and rabbit1Spawn() and not rabbit1Spawn.Dead()
-    local rabbit2Valid = rabbit2Spawn and rabbit2Spawn() and not rabbit2Spawn.Dead()
-    
-    -- If no rabbits are alive, resume DPS
-    if not rabbit1Valid and not rabbit2Valid then
+    -- Nothing needs mezzing
+    if #targets == 0 then
         ResumeDPS()
         return
     end
     
-    local needsMezzing = false
+    -- Sort by distance (closest first)
+    table.sort(targets, function(a, b) return a.distance < b.distance end)
     
-    -- Check rabbit1 first - mez if not already mezzed
-    if rabbit1Valid then
-        local distance = rabbit1Spawn.Distance() or 999
-        if distance <= 120 and rabbit1Spawn.LineOfSight() then
-            if not hasMezBuff(rabbit1ID) then
-                StopDPS()
-                castMezOnTarget(rabbit1ID, "a_white_rabbit00")
-                needsMezzing = true
-                -- Don't return here - we might need to check rabbit2 on next cycle
-            end
+    -- Try each target in distance order until one succeeds
+    StopDPS()
+    for _, target in ipairs(targets) do
+        if castMezOnTarget(target.id, target.name) then
+            return
         end
-    end
-    
-    -- Check rabbit2 - mez if not already mezzed (and we didn't just mez rabbit1)
-    if rabbit2Valid and not needsMezzing then
-        local distance = rabbit2Spawn.Distance() or 999
-        if distance <= 120 and rabbit2Spawn.LineOfSight() then
-            if not hasMezBuff(rabbit2ID) then
-                StopDPS()
-                castMezOnTarget(rabbit2ID, "a_white_rabbit01")
-                needsMezzing = true
-            end
-        end
-    end
-    
-    -- If no mezzing needed (all mezzed), resume DPS
-    if not needsMezzing then
-        ResumeDPS()
-    end
-end
-
--- Command handler for pause/unpause
-local function handleCommand(...)
-    local args = {...}
-    if #args > 0 then
-        local cmd = args[1]:lower()
-        if cmd == 'on' then
-            isPaused = true
-            print('[LS Mez] PAUSED - Mez loop stopped')
-        elseif cmd == 'off' then
-            isPaused = false
-            print('[LS Mez] UNPAUSED - Mez loop resumed')
-        else
-            print('[LS Mez] Usage: /mqp on|off')
-        end
-    else
-        print('[LS Mez] Usage: /mqp on|off')
     end
 end
 
 -- Main loop
 local function main()
     print('[LS Mez] Starting mez coordination...')
-    
-    -- Register command
-    mq.bind('/mqp', handleCommand)
-    print('[LS Mez] Command registered: /mqp on|off')
     
     -- Validate class first (before zone check)
     local myClass = mq.TLO.Me.Class.ShortName()
@@ -322,40 +252,35 @@ local function main()
         print('[LS Mez] No mez configuration found, exiting')
         return
     end
-    
-    -- Initialize
-    math.randomseed(os.time()*mq.TLO.Me.ID())
-    print('[LS Mez] Mez coordination loaded for ' .. mq.TLO.Me.Class.ShortName())
-    
-    -- Check spell loadout
-    for _, data in ipairs(mez) do
-        if data.type == 'spell' then
-            local Spellname = mq.TLO.Spell(data.name).RankName()
-            if mq.TLO.Me.Gem(Spellname)() and mq.TLO.Me.Gem(Spellname)() > 0 then
-                print('[LS Mez] Spell ', data.name,' memmed, good boy')
-            else
-                print('[LS Mez] Spell ', data.name,' not memmed, you suck')
-            end
-        end
+
+    -- Cache spell data at startup
+    initMezCache(myClass)
+    if #cachedMezAbilities == 0 then
+        print('[LS Mez] No mez abilities resolved, exiting')
+        return
     end
-    
-    -- Enable DPS pause to allow mezzing
-    print('[LS Mez] Starting with /mqp on and /rdpause on...')
     
     print('[LS Mez] Mez loop active. Monitoring for rabbits...')
     
     -- Main loop
-    local running = true
-    while running do
-        mq.delay(500)  -- Check every 500ms like encmez
+    while true do
+        mq.delay(250)
         
-        -- Only perform mez rotation if not paused
-        if not isPaused then
-            performMezRotation()
+        -- Skip if dead
+        if (mq.TLO.Me.PctHPs() or 0) < 5 then
+            goto continue
         end
+        
+        -- Exit if no longer in required zone
+        if not required_zone[mq.TLO.Zone.ShortName()] then
+            print('[LS Mez] Left required zone - terminating.')
+            ResumeDPS()
+            return
+        end
+        
+        performMezRotation()
+        ::continue::
     end
-    
-    print('[LS Mez] Mez coordination stopped')
 end
 
 -- Start the script
