@@ -8,6 +8,19 @@ local ImGui = require('ImGui')
 
 local guiOpen = true
 
+-- Exit if Warrior class
+if mq.TLO.Me.Class.ShortName() == 'WAR' then
+    print('[LS Prisoner Knife] Not for Warriors')
+    mq.exit()
+end
+
+-- Exit if Brigadier_Navulta00 is not spawned
+local navCheck = mq.TLO.Spawn('npc "Brigadier_Navulta00"')
+if not navCheck or not navCheck.ID() or navCheck.ID() == 0 then
+    print('[LS Prisoner Knife] Brigadier_Navulta00 not detected - exiting')
+    mq.exit()
+end
+
 local knifePhase = nil
 local knifePreEndMs = 0
 local knifePostEndMs = 0
@@ -18,6 +31,7 @@ local SAFE_LOCS = {
     {x = 1068.64, y = 1714.43, z = 438.52},
     {x = 995.20, y = 1631.82, z = 438.52},
     {x = 1094.34, y = 1570.35, z = 438.52},
+    {x = 1080.79, y = 1660.67, z = 439.49},
 }
 
 local function calculateDistance(x1, y1, z1, x2, y2, z2)
@@ -27,23 +41,35 @@ local function calculateDistance(x1, y1, z1, x2, y2, z2)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
-local function findFurthestSafeLoc()
+local function findClosestSafeLoc(navSpawn)
     local myX = mq.TLO.Me.X() or 0
     local myY = mq.TLO.Me.Y() or 0
     local myZ = mq.TLO.Me.Z() or 0
+    local navX = navSpawn.X() or 0
+    local navY = navSpawn.Y() or 0
+    local navZ = navSpawn.Z() or 0
 
-    local furthest = nil
-    local maxDistance = -1
+    local best = nil
+    local bestDist = 999999
+    local fallback = nil
+    local fallbackNavDist = -1
 
     for _, loc in ipairs(SAFE_LOCS) do
-        local distance = calculateDistance(myX, myY, myZ, loc.x, loc.y, loc.z)
-        if distance > maxDistance then
-            maxDistance = distance
-            furthest = loc
+        local distFromNav = calculateDistance(navX, navY, navZ, loc.x, loc.y, loc.z)
+        local distFromMe = calculateDistance(myX, myY, myZ, loc.x, loc.y, loc.z)
+        if distFromNav >= 70 then
+            if distFromMe < bestDist then
+                bestDist = distFromMe
+                best = loc
+            end
+        end
+        if distFromNav > fallbackNavDist then
+            fallbackNavDist = distFromNav
+            fallback = loc
         end
     end
 
-    return furthest
+    return best or fallback
 end
 
 local function onBrigadierKnives(line)
@@ -53,10 +79,17 @@ local function onBrigadierKnives(line)
     local dist = nav.Distance() or 999
     if dist > 65 then return end
 
+    local navTarget = nav.Target and nav.Target.CleanName() or ""
+    local myName = mq.TLO.Me.CleanName() or ""
+    if navTarget == myName then
+        print('[LS Prisoner Knife] I am Navulta\'s target (tank) - not running')
+        return
+    end
+
     mq.cmd('/nav recordwaypoint tmpcamp "tmp camp"')
-    knifeTargetLoc = findFurthestSafeLoc()
+    knifeTargetLoc = findClosestSafeLoc(nav)
     knifePhase = 'pre'
-    knifePreEndMs = mq.gettime() + 6000
+    knifePreEndMs = mq.gettime() + 7000
 end
 
 mq.event('ls_prisonerknife_brigadier_knives', '#*#Brigadier Navulta magically twirls several knives in the air#*#', onBrigadierKnives)
@@ -128,10 +161,14 @@ while true do
         elseif not navActive and navDist > 65 then
 
             knifePhase = 'post'
-            knifePostEndMs = mq.gettime() + 8000
+            knifePostEndMs = mq.gettime() + 5000
         end
     elseif knifePhase == 'post' and mq.gettime() >= knifePostEndMs then
         mq.cmd('/nav waypoint tmpcamp')
+        mq.delay(3000, function() return not mq.TLO.Navigation.Active() end)
+        mq.cmd('/target Brigadier_Navulta00')
+        mq.delay(500)
+        mq.cmd('/face')
         mq.cmd('/rdpause off')
         mq.cmd('/mqp off')
         knifePhase = nil
