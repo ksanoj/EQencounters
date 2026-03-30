@@ -1,3 +1,5 @@
+-- This is meant to be run at lvl where a single char can solo the missions
+
 local mq = require('mq')
 local ImGui = require('ImGui')
 
