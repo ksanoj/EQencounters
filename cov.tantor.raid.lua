@@ -12,66 +12,69 @@ local function nowMs()
     return os.clock() * 1000
 end
 
--- Drive longer actions from the main loop so mq.doevents() stays responsive.
 local state = {
     run = { active = false, stage = 0, stageAtMs = 0, returnStage = 0 },
-    rock = { active = false, stage = 0, stageAtMs = 0, lastDuckKeyMs = 0 },
+    rock = { active = false, stage = 0, stageAtMs = 0, lastDuckKeyMs = 0, wasMqpOn = false, wasRdpauseOn = false },
     tantrum = { active = false, stage = 0, stageAtMs = 0 },
 }
 
--- Throttle expensive spawn scanning in GUI
 local spawnCache = {
     lastUpdateMs = 0,
     guardians = {},
     tantorlings = {},
 }
 
+local ROCK_TIMEOUT_MS = 10000
+local RUN_TIMEOUT_MS = 30000
+local NAV_TIMEOUT_MS = 15000
+local RETURN_NAV_GRACE_MS = 500
+
+local function sanitize(s)
+    return (s or ''):gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%p%s]+$', '')
+end
+
+local cachedZone = ''
+
 local function refreshSpawnCache()
     spawnCache.guardians = {}
     spawnCache.tantorlings = {}
     spawnCache.lastUpdateMs = nowMs()
 
-    local guardianSearch = mq.TLO.SpawnCount('npc "a primal guardian" radius 1000')
-    if guardianSearch and guardianSearch() and guardianSearch() > 0 then
-        for i = 1, guardianSearch() do
-            local guardian = mq.TLO.NearestSpawn(string.format('%d,npc "a primal guardian" radius 1000', i))
-            if guardian and guardian.ID() and guardian.ID() > 0 then
-                table.insert(spawnCache.guardians, {
-                    id = guardian.ID(),
-                    name = guardian.Name() or 'Unknown',
-                    hp = guardian.PctHPs() or 0,
-                })
-            end
+    local guardianCount = mq.TLO.SpawnCount('npc "a primal guardian" radius 1000')() or 0
+    for i = 1, guardianCount do
+        local guardian = mq.TLO.NearestSpawn(string.format('%d,npc "a primal guardian" radius 1000', i))
+        if guardian and guardian.ID() and guardian.ID() > 0 then
+            table.insert(spawnCache.guardians, {
+                id = guardian.ID(),
+                name = guardian.Name() or 'Unknown',
+                hp = guardian.PctHPs() or 0,
+            })
         end
     end
 
-    local tantorlingSearch = mq.TLO.SpawnCount('npc "a tantorling" radius 1000')
-    if tantorlingSearch and tantorlingSearch() and tantorlingSearch() > 0 then
-        for i = 1, tantorlingSearch() do
-            local tantorling = mq.TLO.NearestSpawn(string.format('%d,npc "a tantorling" radius 1000', i))
-            if tantorling and tantorling.ID() and tantorling.ID() > 0 then
-                table.insert(spawnCache.tantorlings, {
-                    id = tantorling.ID(),
-                    name = tantorling.Name() or 'Unknown',
-                    hp = tantorling.PctHPs() or 0,
-                })
-            end
+    local tantorlingCount = mq.TLO.SpawnCount('npc "a tantorling" radius 1000')() or 0
+    for i = 1, tantorlingCount do
+        local tantorling = mq.TLO.NearestSpawn(string.format('%d,npc "a tantorling" radius 1000', i))
+        if tantorling and tantorling.ID() and tantorling.ID() > 0 then
+            table.insert(spawnCache.tantorlings, {
+                id = tantorling.ID(),
+                name = tantorling.Name() or 'Unknown',
+                hp = tantorling.PctHPs() or 0,
+            })
         end
     end
 end
 
 local function on_tantor_giveup(line, ...)
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
+    if cachedZone ~= ZONE_NAME then return end
     if not isRunningFromTantor then return end
     state.run.returnStage = 1
 end
 
 local function on_tantor_roar(line, target)
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
+    if cachedZone ~= ZONE_NAME then return end
     local me = mq.TLO.Me.DisplayName() or ''
-    local tgt = (target or ''):gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%p%s]+$', '')
-    if tgt ~= me then return end
-    -- Non-blocking: main loop will drive the rest.
+    if sanitize(target) ~= me then return end
     isRunningFromTantor = true
     state.run.active = true
     state.run.stage = 1
@@ -79,11 +82,9 @@ local function on_tantor_roar(line, target)
 end
 
 local function on_tantor_rock(line, target)
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
+    if cachedZone ~= ZONE_NAME then return end
     local me = mq.TLO.Me.DisplayName() or ''
-    local tgt = (target or ''):gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%p%s]+$', '')
-    if tgt ~= me then return end
-    -- Non-blocking: main loop will repeatedly attempt to duck until successful.
+    if sanitize(target) ~= me then return end
     isDuckingFromRock = true
     state.rock.active = true
     state.rock.stage = 1
@@ -92,23 +93,16 @@ local function on_tantor_rock(line, target)
 end
 
 local function on_tantor_rock_miss(line)
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
-    
-    -- Only process if THIS character was the one ducking
+    if cachedZone ~= ZONE_NAME then return end
     if not isDuckingFromRock then return end
-
-    -- Non-blocking: main loop will stand/unpause/cleanup.
-    state.rock.stage = 3
+    state.rock.stage = 4  -- Jump to cleanup
     state.rock.stageAtMs = nowMs()
 end
 
 local function on_small_mammoths(line, name1, name2, name3)
     if not ENABLE_TANTRUM then return end
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
+    if cachedZone ~= ZONE_NAME then return end
     local me = mq.TLO.Me.DisplayName() or ''
-    local function sanitize(s)
-        return (s or ''):gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%p%s]+$', '')
-    end
     local n1, n2, n3 = sanitize(name1), sanitize(name2), sanitize(name3)
     if me ~= n1 and me ~= n2 and me ~= n3 then return end
     state.tantrum.active = true
@@ -139,19 +133,17 @@ local function drawGUI()
         ImGui.End()
         return
     end
-    local tantor = mq.TLO.Spawn('#Tantor')
+    local tantor = mq.TLO.Spawn('npc Tantor')
     if tantor and tantor.ID() and tantor.ID() > 0 then
         local hpPercent = tantor.PctHPs() or 0
         ImGui.Text(string.format("Tantor: %d%%", hpPercent))
         
         -- Flashing red DUCKING! text if player is ducking
         if mq.TLO.Me.Ducking() then
-            local flashRate = math.floor(os.clock() * 2) % 2  -- Flash every 0.5 seconds
-            if flashRate == 0 then
-                ImGui.PushStyleColor(ImGuiCol.Text, ImVec4(1, 0, 0, 1))  -- Bright red
-                ImGui.Text("DUCKING!")
-                ImGui.PopStyleColor()
-            end
+            local flashAlpha = (math.floor(os.clock() * 4) % 2 == 0) and 1.0 or 0.3
+            ImGui.PushStyleColor(ImGuiCol.Text, ImVec4(1, 0, 0, flashAlpha))
+            ImGui.Text("DUCKING!")
+            ImGui.PopStyleColor()
         end
         
         if hpPercent > 71 then
@@ -208,7 +200,8 @@ print('covtantor.lua loaded')
 mq.imgui.init('TantorHP', drawGUI)
 
 local function tickState()
-    if (mq.TLO.Zone.ShortName() or '') ~= ZONE_NAME then return end
+    cachedZone = mq.TLO.Zone.ShortName() or ''
+    if cachedZone ~= ZONE_NAME then return end
 
     local now = nowMs()
 
@@ -227,6 +220,12 @@ local function tickState()
                 mq.cmd('/circle on 200')
                 mq.cmd('/circle loc -646.06 -936.68')
                 state.run.stage = 3
+                state.run.stageAtMs = now
+            end
+        elseif state.run.stage == 3 then
+            if (now - state.run.stageAtMs) > RUN_TIMEOUT_MS then
+                mq.cmd('/dgt [LUA] Run timeout - forcing return')
+                state.run.returnStage = 1
             end
         end
     end
@@ -238,7 +237,8 @@ local function tickState()
         state.run.returnStage = 2
         state.run.stageAtMs = now
     elseif state.run.returnStage == 2 then
-        if not mq.TLO.Navigation.Active() then
+        local elapsed = now - state.run.stageAtMs
+        if elapsed > RETURN_NAV_GRACE_MS and not mq.TLO.Navigation.Active() then
             mq.cmd('/mqp off')
             mq.cmd('/rdpause off')
             mq.cmd('/dgt [LUA] Returning to raid')
@@ -246,33 +246,56 @@ local function tickState()
             state.run.active = false
             state.run.stage = 0
             state.run.returnStage = 0
+        elseif elapsed > NAV_TIMEOUT_MS then
+            mq.cmd('/nav stop')
+            mq.cmd('/mqp off')
+            mq.cmd('/rdpause off')
+            mq.cmd('/dgt [LUA] Return nav timeout - unpausing')
+            isRunningFromTantor = false
+            state.run.active = false
+            state.run.stage = 0
+            state.run.returnStage = 0
         end
     end
 
-    -- Rock ducking sequence (non-blocking, retries duck keypress to handle lag)
+    -- Rock ducking sequence (non-blocking, with pause state preservation)
     if state.rock.active then
         if state.rock.stage == 1 then
-            mq.cmd('/dgt [LUA] Ducking for stone.')
+            -- Stage 1: Save state, pause, dismount
+            state.rock.wasMqpOn = mq.TLO.MacroQuest.Paused and mq.TLO.MacroQuest.Paused() or false
+            state.rock.wasRdpauseOn = _G.RdPaused or false
             mq.cmd('/mqp on')
             mq.cmd('/rdpause on')
             mq.cmd('/dismount')
+            mq.cmd('/dgt [LUA] Ducking for stone.')
             state.rock.stage = 2
             state.rock.stageAtMs = now
             state.rock.lastDuckKeyMs = 0
         elseif state.rock.stage == 2 then
-            if not mq.TLO.Me.Ducking() then
-                if (now - (state.rock.lastDuckKeyMs or 0)) > 250 then
+            -- Stage 2: Wait for dismount (1 second)
+            if (now - state.rock.stageAtMs) >= 1000 then
+                state.rock.stage = 3
+                state.rock.stageAtMs = now
+            end
+        elseif state.rock.stage == 3 then
+            -- Stage 3: Duck and maintain
+            if (now - state.rock.stageAtMs) > ROCK_TIMEOUT_MS then
+                state.rock.stage = 4
+                state.rock.stageAtMs = now
+            elseif not mq.TLO.Me.Ducking() then
+                if (now - state.rock.lastDuckKeyMs) > 250 then
                     mq.cmd('/keypress DUCK')
                     state.rock.lastDuckKeyMs = now
                 end
             end
-        elseif state.rock.stage == 3 then
-            mq.cmd('/dgt [LUA] Stone missed re-engaging')
+        elseif state.rock.stage == 4 then
+            -- Stage 4: Cleanup with state preservation
             if mq.TLO.Me.Ducking() then
                 mq.cmd('/keypress DUCK')
             end
-            mq.cmd('/rdpause off')
-            mq.cmd('/mqp off')
+            if not state.rock.wasRdpauseOn then mq.cmd('/rdpause off') end
+            if not state.rock.wasMqpOn then mq.cmd('/mqp off') end
+            mq.cmd('/dgt [LUA] Stone complete - re-engaging')
             isDuckingFromRock = false
             state.rock.active = false
             state.rock.stage = 0
@@ -291,14 +314,16 @@ local function tickState()
                 state.tantrum.stage = 3
             end
         elseif state.tantrum.stage == 3 then
-            if not mq.TLO.Navigation.Active() then
+            if not mq.TLO.Navigation.Active() or (now - state.tantrum.stageAtMs) > NAV_TIMEOUT_MS then
                 state.tantrum.stage = 4
+                state.tantrum.stageAtMs = now
             end
         elseif state.tantrum.stage == 4 then
             mq.cmd('/nav waypoint tmpcamp')
             state.tantrum.stage = 5
+            state.tantrum.stageAtMs = now
         elseif state.tantrum.stage == 5 then
-            if not mq.TLO.Navigation.Active() then
+            if not mq.TLO.Navigation.Active() or (now - state.tantrum.stageAtMs) > NAV_TIMEOUT_MS then
                 state.tantrum.active = false
                 state.tantrum.stage = 0
             end
